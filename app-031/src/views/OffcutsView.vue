@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import { useStore, removeOffcut, toggleOffcut, addManualOffcut } from '../lib/store'
+import { useStore, removeOffcut, toggleOffcut, addManualOffcut, OFFCUT_MIN_MM } from '../lib/store'
 import { toast } from '../lib/ui'
 
 const { state } = useStore()
@@ -10,15 +10,17 @@ const form = reactive({ wMm: 800, hMm: 500, thicknessMm: 18, material: '颗粒�
 const sorted = computed(() =>
   [...state.offcuts].sort((a, b) => Number(b.available) - Number(a.available) || b.createdAt - a.createdAt)
 )
+// 页顶两项只累加当前仍可用的余料；面积按 mm² 累加，展示时折成 m² 保留 2 位
 const availCount = computed(() => state.offcuts.filter((o) => o.available).length)
-const availArea = computed(() => state.offcuts.reduce((a, o) => a + o.wMm * o.hMm, 0))
+const availArea = computed(() =>
+  state.offcuts.filter((o) => o.available).reduce((a, o) => a + o.wMm * o.hMm, 0)
+)
 
 function add(): void {
-  if (form.wMm < 50 || form.hMm < 50) {
-    toast('余料尺寸过小，无再利用价值', 'bad')
+  if (!addManualOffcut({ ...form })) {
+    toast(`可用余料要求长、宽均 ≥${OFFCUT_MIN_MM}mm，否则只能算碎料，不予登记`, 'bad')
     return
   }
-  addManualOffcut({ ...form })
   toast('余料已登记', 'good')
   showForm.value = false
 }
@@ -50,7 +52,7 @@ function del(id: string): void {
         <label class="field" style="width: 160px"><span>材质</span><input v-model="form.material" /></label>
         <button class="primary" @click="add">保存</button>
       </div>
-      <p class="small muted">手工余料一般来自其他批次/测量得到的剩余板；开料产生的余料在排样页一键登记。</p>
+      <p class="small muted">手工余料一般来自其他批次/测量得到的剩余板；开料产生的余料在排样页一键登记。长、宽均 ≥{{ OFFCUT_MIN_MM }}mm 才记为可用余料。</p>
     </section>
 
     <section class="panel" style="margin-top: 14px">

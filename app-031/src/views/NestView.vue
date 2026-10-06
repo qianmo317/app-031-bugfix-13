@@ -46,7 +46,8 @@ function registerSheet(si: number): void {
     .filter((o) => o.usable)
     .map((o) => ({ sheetIndex: si, x: o.x, y: o.y, wMm: o.wMm, hMm: o.hMm }))
   const n = registerOffcuts(job.value, picks)
-  toast(`已登记 ${n} 块余料，可在下次开料优先使用`, 'good')
+  if (n > 0) toast(`已登记 ${n} 块余料，可在下次开料优先使用`, 'good')
+  else toast('本板可用余料均已登记过，没有新增', 'info')
 }
 function registerAll(): void {
   if (!job.value?.result) return

@@ -39,10 +39,43 @@ function persist(): void {
   localStorage.setItem(OFFCUTS_KEY, JSON.stringify(state.offcuts))
 }
 
+/**
+ * 旧存档兼容：早先存下的余料可能缺少 available/usedByJobId 这类状态字段，
+ * 读回来时按默认值补齐——缺 available 视为「仍可优先使用」（已有 usedByJobId 的除外），
+ * 不许因为缺字段把可用余料当成已用掉。
+ */
+function normalizeOffcut(o: RegisteredOffcut): RegisteredOffcut {
+  return {
+    ...o,
+    available: typeof o.available === 'boolean' ? o.available : !o.usedByJobId,
+    usedByJobId: o.usedByJobId || undefined
+  }
+}
+
+/**
+ * 旧存档兼容：补齐后加字段（useOffcutIds 等）；剔除历史上被错误写进
+ * 项目板材列表的余料板（kind === 'offcut' 一律是排样时临时拼的，不属于项目），
+ * 并把指向已不存在板材的零件 boardId 复位为「自动」。
+ */
+function normalizeJob(j: Job): Job {
+  const boards = (j.boards ?? []).filter((b) => b.kind !== 'offcut')
+  const ids = new Set(boards.map((b) => b.id))
+  const parts = (j.parts ?? []).map((p) =>
+    p.boardId && !ids.has(p.boardId) ? { ...p, boardId: '' } : p
+  )
+  return {
+    ...j,
+    boards,
+    parts,
+    useOffcutIds: Array.isArray(j.useOffcutIds) ? j.useOffcutIds : [],
+    batchByCabinet: j.batchByCabinet === true
+  }
+}
+
 function init(): void {
   if (state.loaded) return
-  state.jobs = load<Job[]>(JOBS_KEY, [])
-  state.offcuts = load<RegisteredOffcut[]>(OFFCUTS_KEY, [])
+  state.jobs = load<Job[]>(JOBS_KEY, []).map(normalizeJob)
+  state.offcuts = load<RegisteredOffcut[]>(OFFCUTS_KEY, []).map(normalizeOffcut)
   state.loaded = true
 }
 
@@ -119,33 +152,50 @@ export function getJob(id: string): Job | undefined {
   return state.jobs.find((j) => j.id === id)
 }
 
-/** 把勾选的登记余料转成本单可用的小板（排在板材列表前，优先消耗）。 */
+/**
+ * 余料参与排样，两条路只取一条——这里选【临时拼接】：
+ *   只在本次排样里把「可用且本单勾选」的余料拼进板材列表的一个副本，
+ *   项目自己的 job.boards 永远不被改动，板材列表一直干净，
+ *   存档项目的张数与料钱只按项目自购板计算；代价是每排一次重新拼一遍
+ *   （仅 O(余料数)，可忽略）。
+ * 被放弃的另一条路是【写进项目板材列表】：省去每次拼接，但余料板会
+ *   越积越多并随之写回本机存档，存档项目的张数与料钱从此失真，
+ *   连同按它导出的单据只能作废重来。
+ */
 function boardsWithOffcuts(job: Job): Board[] {
-  const list = state.offcuts.filter((o) => o.available)
-  for (const o of list) {
-    job.boards.unshift({
-      id: `offcut_${o.id}`,
-      name: `余料板 ${o.wMm}×${o.hMm}`,
-      wMm: o.wMm,
-      hMm: o.hMm,
-      thicknessMm: o.thicknessMm,
-      material: o.material,
-      priceCents: 0,
-      quantity: 1,
-      kind: 'offcut',
-      offcutId: o.id
-    })
-  }
-  return job.boards
+  // 与清单页勾选同一结论：只有 available 且在本单 useOffcutIds 里的余料才能进这一单
+  const picked = state.offcuts.filter((o) => o.available && job.useOffcutIds.includes(o.id))
+  const offcutBoards: Board[] = picked.map((o) => ({
+    id: `offcut_${o.id}`,
+    name: `余料板 ${o.wMm}×${o.hMm}`,
+    wMm: o.wMm,
+    hMm: o.hMm,
+    thicknessMm: o.thicknessMm,
+    material: o.material,
+    priceCents: 0,
+    quantity: 1,
+    kind: 'offcut',
+    offcutId: o.id
+  }))
+  return [...offcutBoards, ...job.boards]
 }
 
 export function runNest(job: Job): NestResult {
   const effective: Job = { ...job, boards: boardsWithOffcuts(job) }
   const result = nestJob(effective)
-  // 标记被用掉的余料
+  // 被实际挑中用掉的余料：立刻标成已用并写回本机存储，下一单读回来不会再被挑中
+  const consumed = new Set<string>()
   for (const oc of state.offcuts) {
     if (result.sheets.some((s) => s.boardId === `offcut_${oc.id}`)) {
+      oc.available = false
       oc.usedByJobId = job.id
+      consumed.add(oc.id)
+    }
+  }
+  // 各项目清单页勾选项同步刷新：已用掉的余料不再留在任何一单的勾选里
+  if (consumed.size > 0) {
+    for (const j of state.jobs) {
+      j.useOffcutIds = j.useOffcutIds.filter((id) => !consumed.has(id))
     }
   }
   job.result = result
@@ -203,15 +253,38 @@ export function applyAdjustment(
   return null
 }
 
+/*
+ * 余料的单位与精度约定（余料登记页 / 清单页勾选 / 排样内核 / 结果页登记入口共用）：
+ * - 尺寸：毫米 mm，整数（排样内核产出时已 Math.round，不再保留小数）；
+ * - 面积：一律按平方毫米 mm² 累加，展示时 ÷1e6 折成平方米 m²，保留 2 位小数；
+ * - 可用判定：长、宽两边均 ≥ OFFCUT_MIN_MM（300mm，见 boards.json defaults.offcutMinMm）
+ *   才算可用余料，否则只是碎料留档，不进可用列表、不参与排样。
+ */
+
+/** 可用余料门槛：两边均 ≥300mm（唯一出处：boards.json defaults.offcutMinMm）。 */
+export const OFFCUT_MIN_MM = boardsData.defaults.offcutMinMm
+
+/**
+ * 批量登记余料：先按「项目 + 板号 + 尺寸」去重（同一张板上的同一块余料
+ * 不许落下两条），再把剩下的一次性写回本机存储。返回实际新增条数。
+ */
 export function registerOffcuts(
   job: Job,
   picks: { sheetIndex: number; x: number; y: number; wMm: number; hMm: number }[]
 ): number {
   if (!job.result) return 0
-  let n = 0
+  const seen = new Set(
+    state.offcuts
+      .filter((o) => o.jobId === job.id)
+      .map((o) => `${o.sheetIndex}|${o.wMm}|${o.hMm}`)
+  )
+  const fresh: RegisteredOffcut[] = []
   for (const pick of picks) {
+    const key = `${pick.sheetIndex}|${pick.wMm}|${pick.hMm}`
+    if (seen.has(key)) continue
+    seen.add(key)
     const sheet = job.result.sheets[pick.sheetIndex]
-    state.offcuts.push({
+    fresh.push({
       id: uid('oc'),
       jobId: job.id,
       jobName: job.name,
@@ -223,18 +296,22 @@ export function registerOffcuts(
       createdAt: Date.now(),
       available: true
     })
-    n++
   }
-  persist()
-  return n
+  if (fresh.length > 0) {
+    state.offcuts.push(...fresh)
+    persist()
+  }
+  return fresh.length
 }
 
+/** 手工登记余料：同样执行「两边均 ≥300mm」的可用门槛，不足的不予登记。 */
 export function addManualOffcut(input: {
   wMm: number
   hMm: number
   thicknessMm: number
   material: string
-}): void {
+}): boolean {
+  if (input.wMm < OFFCUT_MIN_MM || input.hMm < OFFCUT_MIN_MM) return false
   state.offcuts.push({
     id: uid('oc'),
     jobId: '',
@@ -248,6 +325,7 @@ export function addManualOffcut(input: {
     available: true
   })
   persist()
+  return true
 }
 
 export function removeOffcut(id: string): void {
@@ -364,9 +442,10 @@ export function importJobJson(json: string): Job | null {
     obj.id = uid('job')
     obj.createdAt = Date.now()
     obj.result = undefined
-    state.jobs.unshift(obj)
+    const job = normalizeJob(obj)
+    state.jobs.unshift(job)
     persist()
-    return obj
+    return job
   } catch {
     return null
   }
