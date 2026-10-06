@@ -73,7 +73,13 @@ function exportJson(): void {
     <section class="panel" style="margin-top: 14px">
       <h3 style="font-size: 14px; margin-bottom: 8px">导出内容预览（与打印一致）</h3>
       <ul class="small muted">
-        <li>排样图：{{ job.result?.sheets.length ?? 0 }} 张板，同柜同色，标注编号与尺寸</li>
+        <li>
+          排样图：{{ job.result?.boardsUsed ?? 0 }} 张自购板
+          <template v-if="(job.result?.offcutBoardsUsed ?? 0) > 0">
+            ＋ {{ job.result?.offcutBoardsUsed }} 块登记余料
+          </template>
+          ，同柜同色，标注编号与尺寸
+        </li>
         <li>裁切步骤：{{ job.result?.sheets.reduce((a, s) => a + s.steps.length, 0) ?? 0 }} 条刀序（含修边）</li>
         <li>下料单：{{ job.result ? Object.keys(job.result.boardsByType).length : 0 }} 种板材领料 + 按柜明细 + 封边五金</li>
         <li>标签：{{ job.result?.sheets.reduce((a, s) => a + s.placements.length, 0) ?? 0 }} 张（每块零件 1 张）</li>

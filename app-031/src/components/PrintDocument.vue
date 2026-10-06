@@ -63,7 +63,10 @@ const boardByName = (name: string) =>
         :key="'pn' + s.index"
         class="print-page"
       >
-        <h2>排样图 · 第 {{ s.index + 1 }} 张 / 共 {{ job.result?.sheets.length }} 张</h2>
+        <h2>
+          排样图 · 第 {{ s.index + 1 }} 张 / 共 {{ job.result?.sheets.length }} 张
+          <span v-if="s.kind === 'offcut'">（登记余料再利用，不计采购张数与料钱）</span>
+        </h2>
         <p class="doc-meta">
           {{ s.boardName }}（{{ s.material }} {{ s.thicknessMm }}mm） · 尺寸
           {{ s.wMm }}×{{ s.hMm }}mm · 利用率 {{ (s.utilization * 100).toFixed(1) }}% ·
@@ -150,6 +153,9 @@ const boardByName = (name: string) =>
             </tr>
           </tfoot>
         </table>
+        <p v-if="(job.result?.offcutBoardsUsed ?? 0) > 0" class="doc-meta" style="margin-top:4px">
+          另有 {{ job.result?.offcutBoardsUsed }} 块已登记余料参与本单排样，为厂内已有料，不计入上方采购张数与料钱。
+        </p>
 
         <h3>二、零件明细（按柜体分拣）</h3>
         <div v-for="[cab, list] in cabinetGroups" :key="cab" class="avoid-break">

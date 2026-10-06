@@ -56,8 +56,11 @@ const utilMinMax = computed(() => {
     <section class="panel headline">
       <div class="hl-text">
         <h2>
-          本方案用 <b>{{ result.boardsUsed }}</b> 张板，
-          比随手排省 <b class="hl">{{ result.savedBoards }}</b> 张
+          本方案用 <b>{{ result.boardsUsed }}</b> 张自购板
+          <template v-if="result.offcutBoardsUsed > 0">
+            ＋ <b>{{ result.offcutBoardsUsed }}</b> 块登记余料（不计采购张数与料钱）
+          </template>
+          ，比随手排省 <b class="hl">{{ result.savedBoards }}</b> 张
           <span class="hl-money">约 {{ money(result.savedCents) }}</span>
         </h2>
         <p class="muted">

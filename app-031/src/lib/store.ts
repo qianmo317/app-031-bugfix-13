@@ -5,6 +5,12 @@ import { nestJob } from './packing'
 import { rebuildFromPlacements } from './cuts'
 import { guillotineViolation } from './geometry'
 import { uid } from './format'
+import {
+  isUsableOffcutSize,
+  normalizeOffcut,
+  offcutKey,
+  registeredOffcutKey
+} from './offcuts'
 import boardsData from '../data/boards.json'
 
 const JOBS_KEY = 'fco.jobs.v1'
@@ -41,9 +47,23 @@ function persist(): void {
 
 function init(): void {
   if (state.loaded) return
+  // 旧存档余料补齐默认值（缺 available 时按可用兼容）
+  state.offcuts = load<RegisteredOffcut[]>(OFFCUTS_KEY, []).map(normalizeOffcut)
   state.jobs = load<Job[]>(JOBS_KEY, [])
-  state.offcuts = load<RegisteredOffcut[]>(OFFCUTS_KEY, [])
+  // 清掉早期版本误写进项目板材列表的余料板：项目列表只保留自购板，
+  // 余料一律在排样时临时拼接。顺带剔除指向已不存在/已用掉余料的勾选。
+  for (const j of state.jobs) sanitizeJob(j)
   state.loaded = true
+}
+
+/** 项目板材列表只允许出现自购板；清掉历史污染的余料板与失效勾选。 */
+function sanitizeJob(job: Job): void {
+  if (Array.isArray(job.boards)) {
+    job.boards = job.boards.filter((b) => b.kind !== 'offcut' && !b.id.startsWith('offcut_'))
+  }
+  if (!Array.isArray(job.useOffcutIds)) job.useOffcutIds = []
+  const live = new Set(state.offcuts.filter((o) => o.available).map((o) => o.id))
+  job.useOffcutIds = job.useOffcutIds.filter((id) => live.has(id))
 }
 
 export function defaultBoards(): Board[] {
@@ -119,35 +139,48 @@ export function getJob(id: string): Job | undefined {
   return state.jobs.find((j) => j.id === id)
 }
 
-/** 把勾选的登记余料转成本单可用的小板（排在板材列表前，优先消耗）。 */
-function boardsWithOffcuts(job: Job): Board[] {
-  const list = state.offcuts.filter((o) => o.available)
-  for (const o of list) {
-    job.boards.unshift({
-      id: `offcut_${o.id}`,
-      name: `余料板 ${o.wMm}×${o.hMm}`,
-      wMm: o.wMm,
-      hMm: o.hMm,
-      thicknessMm: o.thicknessMm,
-      material: o.material,
-      priceCents: 0,
-      quantity: 1,
-      kind: 'offcut',
-      offcutId: o.id
-    })
-  }
-  return job.boards
+/**
+ * 本次排样的有效板材：勾选且仍可用的登记余料（临时小板，优先消耗）+ 项目自购板。
+ * 只在内存里拼一份新数组，绝不写回 job.boards —— 项目板材列表保持干净，
+ * 张数与料钱只按自购板算；代价是每排一次都要重新拼一遍（纯内存操作）。
+ */
+function boardsWithOffcuts(job: Job): { boards: Board[]; picked: RegisteredOffcut[] } {
+  const picked = job.useOffcutIds
+    .map((id) => state.offcuts.find((o) => o.id === id))
+    .filter((o): o is RegisteredOffcut => !!o && o.available)
+  const offcutBoards: Board[] = picked.map((o) => ({
+    id: `offcut_${o.id}`,
+    name: `余料板 ${o.wMm}×${o.hMm}`,
+    wMm: o.wMm,
+    hMm: o.hMm,
+    thicknessMm: o.thicknessMm,
+    material: o.material,
+    priceCents: 0,
+    quantity: 1,
+    kind: 'offcut',
+    offcutId: o.id
+  }))
+  return { boards: [...offcutBoards, ...job.boards], picked }
 }
 
 export function runNest(job: Job): NestResult {
-  const effective: Job = { ...job, boards: boardsWithOffcuts(job) }
+  // 先剔除失效勾选（余料已删除，或已被别的单子标成已用）
+  sanitizeJob(job)
+  const { boards, picked } = boardsWithOffcuts(job)
+  const effective: Job = { ...job, boards }
   const result = nestJob(effective)
-  // 标记被用掉的余料
-  for (const oc of state.offcuts) {
-    if (result.sheets.some((s) => s.boardId === `offcut_${oc.id}`)) {
+  // 实际被挑中的余料立刻标成已用并写回本机存储：下一单读回来时不会再被选中
+  const usedIds = new Set(
+    result.sheets.filter((s) => s.kind === 'offcut' && s.offcutId).map((s) => s.offcutId!)
+  )
+  for (const oc of picked) {
+    if (usedIds.has(oc.id)) {
+      oc.available = false
       oc.usedByJobId = job.id
     }
   }
+  // 本单勾选中已被吃掉的块同步移除，页面各处看到的就是同一份结论
+  job.useOffcutIds = job.useOffcutIds.filter((id) => !usedIds.has(id))
   job.result = result
   persist()
   return result
@@ -183,13 +216,13 @@ export function applyAdjustment(
   )
   if (!rebuilt) return '调整后无法生成可执行的贯通裁切刀路'
   const offcuts = rebuilt.leftovers
-    .filter((r) => r.w >= 300 - 0.05 && r.h >= 300 - 0.05)
+    .filter((r) => isUsableOffcutSize(Math.round(r.w), Math.round(r.h)))
     .map((r) => ({
       x: Math.round(r.x),
       y: Math.round(r.y),
       wMm: Math.round(r.w),
       hMm: Math.round(r.h),
-      areaMm2: Math.round(r.w * r.h),
+      areaMm2: Math.round(r.w) * Math.round(r.h),
       usable: true
     }))
     .sort((a, b) => b.areaMm2 - a.areaMm2)
@@ -203,26 +236,41 @@ export function applyAdjustment(
   return null
 }
 
+/**
+ * 一次登记多块余料：先按（项目, 板号, 尺寸）去重（含与已登记记录去重），
+ * 再筛掉任一边不足 300mm 的碎料，最后把剩下的一次写回本机存储。
+ * 同一块料不会落下两条；返回实际新增条数。
+ */
 export function registerOffcuts(
   job: Job,
   picks: { sheetIndex: number; x: number; y: number; wMm: number; hMm: number }[]
 ): number {
   if (!job.result) return 0
+  const existing = new Set(state.offcuts.map(registeredOffcutKey))
+  const seen = new Set<string>()
   let n = 0
   for (const pick of picks) {
+    const w = Math.round(pick.wMm)
+    const h = Math.round(pick.hMm)
+    if (!isUsableOffcutSize(w, h)) continue // 两边都 ≥300mm 才登记为可用余料
+    const key = offcutKey(job.id, pick.sheetIndex, w, h)
+    if (existing.has(key) || seen.has(key)) continue
+    seen.add(key)
     const sheet = job.result.sheets[pick.sheetIndex]
-    state.offcuts.push({
-      id: uid('oc'),
-      jobId: job.id,
-      jobName: job.name,
-      sheetIndex: pick.sheetIndex,
-      wMm: pick.wMm,
-      hMm: pick.hMm,
-      thicknessMm: sheet.thicknessMm,
-      material: sheet.material,
-      createdAt: Date.now(),
-      available: true
-    })
+    state.offcuts.push(
+      normalizeOffcut({
+        id: uid('oc'),
+        jobId: job.id,
+        jobName: job.name,
+        sheetIndex: pick.sheetIndex,
+        wMm: w,
+        hMm: h,
+        thicknessMm: sheet?.thicknessMm ?? 0,
+        material: sheet?.material ?? '',
+        createdAt: Date.now(),
+        available: true
+      })
+    )
     n++
   }
   persist()
@@ -234,20 +282,26 @@ export function addManualOffcut(input: {
   hMm: number
   thicknessMm: number
   material: string
-}): void {
-  state.offcuts.push({
-    id: uid('oc'),
-    jobId: '',
-    jobName: '手工登记',
-    sheetIndex: -1,
-    wMm: input.wMm,
-    hMm: input.hMm,
-    thicknessMm: input.thicknessMm,
-    material: input.material,
-    createdAt: Date.now(),
-    available: true
-  })
+}): number {
+  const w = Math.round(input.wMm)
+  const h = Math.round(input.hMm)
+  if (!isUsableOffcutSize(w, h)) return 0
+  state.offcuts.push(
+    normalizeOffcut({
+      id: uid('oc'),
+      jobId: '',
+      jobName: '手工登记',
+      sheetIndex: -1,
+      wMm: w,
+      hMm: h,
+      thicknessMm: input.thicknessMm,
+      material: input.material,
+      createdAt: Date.now(),
+      available: true
+    })
+  )
   persist()
+  return 1
 }
 
 export function removeOffcut(id: string): void {
@@ -364,6 +418,7 @@ export function importJobJson(json: string): Job | null {
     obj.id = uid('job')
     obj.createdAt = Date.now()
     obj.result = undefined
+    sanitizeJob(obj)
     state.jobs.unshift(obj)
     persist()
     return obj

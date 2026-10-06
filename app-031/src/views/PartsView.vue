@@ -11,6 +11,7 @@ import {
 } from '../lib/store'
 import { uid, parsePartText, parseEdges, money } from '../lib/format'
 import { toast } from '../lib/ui'
+import { OFFCUT_MIN_MM } from '../lib/offcuts'
 import type { Board, EdgeSide, Part } from '../types'
 
 const route = useRoute()
@@ -80,6 +81,11 @@ function removeBoard(id: string): void {
 }
 function toggleOffcut(id: string): void {
   if (!job.value) return
+  const o = state.offcuts.find((x) => x.id === id)
+  if (!o || !o.available) {
+    toast('该余料已用掉或已删除，不能参与本单', 'bad')
+    return
+  }
   const arr = job.value.useOffcutIds
   const i = arr.indexOf(id)
   if (i >= 0) arr.splice(i, 1)
@@ -219,7 +225,10 @@ const sampleTsv = `名称\t长\t宽\t数量\t纹理\t封边\t柜体\t见光
         </label>
       </div>
       <div v-if="availableOffcuts.length > 0">
-        <h4 style="margin: 8px 0 6px; font-size: 13px">余料优先：勾选已登记余料作为小板材参与本单排样</h4>
+        <h4 style="margin: 8px 0 6px; font-size: 13px">
+          余料优先：勾选的可用余料（两边 ≥{{ OFFCUT_MIN_MM }}mm）仅作为小板材临时拼入本单排样，
+          不会写进板材库；被排上的那块排完即标记已用并写回本机，其他单子不会再用到它
+        </h4>
         <div class="row wrap">
           <label
             v-for="o in availableOffcuts"

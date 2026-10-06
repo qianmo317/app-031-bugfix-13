@@ -5,6 +5,7 @@ import { getJob, runNest, applyAdjustment, registerOffcuts, useStore } from '../
 import { toast } from '../lib/ui'
 import { printJob } from '../lib/print'
 import { pct, money } from '../lib/format'
+import { offcutKey } from '../lib/offcuts'
 import SheetDiagram from '../components/SheetDiagram.vue'
 import { cabinetFill, cabinetStroke } from '../lib/colors'
 
@@ -29,35 +30,34 @@ const cabinets = computed(() => {
   return [...set].sort()
 })
 
-// 已登记余料：以 (项目, 板, 尺寸) 判重
+// 已登记余料：以 (项目, 板号, 尺寸) 判重，键规则与 store.registerOffcuts 完全一致
 const { state } = useStore()
-function registered(si: number, o: { x: number; y: number; wMm: number; hMm: number }): boolean {
+function registered(si: number, o: { wMm: number; hMm: number }): boolean {
   const j = job.value
   if (!j) return false
-  return state.offcuts.some(
-    (x) => x.jobId === j.id && x.sheetIndex === si && x.wMm === o.wMm && x.hMm === o.hMm
-  )
+  const key = offcutKey(j.id, si, o.wMm, o.hMm)
+  return state.offcuts.some((x) => offcutKey(x.jobId, x.sheetIndex, x.wMm, x.hMm) === key)
 }
 
-function registerSheet(si: number): void {
-  if (!job.value?.result) return
-  const s = job.value.result.sheets[si]
-  const picks = s.offcuts
+function sheetPicks(si: number) {
+  const s = job.value!.result!.sheets[si]
+  return s.offcuts
     .filter((o) => o.usable)
     .map((o) => ({ sheetIndex: si, x: o.x, y: o.y, wMm: o.wMm, hMm: o.hMm }))
-  const n = registerOffcuts(job.value, picks)
-  toast(`已登记 ${n} 块余料，可在下次开料优先使用`, 'good')
+}
+function registerSheet(si: number): void {
+  if (!job.value?.result) return
+  const n = registerOffcuts(job.value, sheetPicks(si))
+  toast(
+    n > 0 ? `已登记 ${n} 块余料，可在下次开料勾选使用` : '本板余料此前均已登记，未重复添加',
+    n > 0 ? 'good' : 'info'
+  )
 }
 function registerAll(): void {
   if (!job.value?.result) return
-  let n = 0
-  job.value.result.sheets.forEach((s, si) => {
-    const picks = s.offcuts
-      .filter((o) => o.usable && !registered(si, o))
-      .map((o) => ({ sheetIndex: si, x: o.x, y: o.y, wMm: o.wMm, hMm: o.hMm }))
-    n += registerOffcuts(job.value!, picks)
-  })
-  toast(n > 0 ? `已登记全部 ${n} 块余料` : '所有余料均已登记', n > 0 ? 'good' : 'info')
+  const picks = job.value.result.sheets.flatMap((_, si) => sheetPicks(si))
+  const n = registerOffcuts(job.value, picks)
+  toast(n > 0 ? `已登记全部 ${n} 块余料` : '所有余料均已登记，未重复添加', n > 0 ? 'good' : 'info')
 }
 
 function rerun(): void {
@@ -140,7 +140,8 @@ function printNest(): void {
   <div v-if="job && result">
     <!-- 总览条 -->
     <section class="panel kpi-bar">
-      <div><b>{{ result.boardsUsed }}</b><span>板材（张）</span></div>
+      <div><b>{{ result.boardsUsed }}</b><span>自购板材（张）</span></div>
+      <div v-if="result.offcutBoardsUsed > 0"><b>{{ result.offcutBoardsUsed }}</b><span>消耗余料（块，不计张数料钱）</span></div>
       <div><b>{{ pct(overallUtil) }}</b><span>综合利用率</span></div>
       <div><b>{{ (result.edgeBandM.exposed + result.edgeBandM.normal).toFixed(1) }}m</b><span>封边总长</span></div>
       <div class="hl"><b>省 {{ result.savedBoards }} 张</b><span>约 {{ money(result.savedCents) }}</span></div>
@@ -182,6 +183,7 @@ function printNest(): void {
         <div class="row" style="margin-bottom: 8px">
           <b>第 {{ activeSheet + 1 }} 张 / 共 {{ result.sheets.length }} 张</b>
           <span class="tag">{{ sheet?.boardName }}</span>
+          <span v-if="sheet?.kind === 'offcut'" class="tag warn">登记余料·本单临时使用</span>
           <span class="tag good">利用率 {{ pct(sheet?.utilization ?? 0) }}</span>
           <span v-if="sheet?.adjusted" class="tag warn">已手工微调</span>
           <div class="spacer" />

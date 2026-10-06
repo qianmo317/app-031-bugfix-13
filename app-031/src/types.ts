@@ -80,6 +80,8 @@ export interface SheetResult {
   wMm: number
   hMm: number
   priceCents: number
+  kind?: 'stock' | 'offcut' // stock 项目自购板 / offcut 本次临时拼入的登记余料
+  offcutId?: string // kind=offcut 时对应 RegisteredOffcut.id
   placements: Placement[]
   steps: CutStep[]
   usedAreaMm2: number
@@ -99,7 +101,8 @@ export interface UnplacedInfo {
 
 export interface NestResult {
   sheets: SheetResult[]
-  boardsUsed: number
+  boardsUsed: number // 项目自购板张数（余料小板不计入，料钱也只算自购板）
+  offcutBoardsUsed: number // 本次实际排上零件的登记余料块数
   boardsByType: Record<string, number>
   edgeBandM: { exposed: number; normal: number }
   unplaced: UnplacedInfo[]

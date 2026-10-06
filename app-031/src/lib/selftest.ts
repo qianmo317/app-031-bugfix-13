@@ -361,6 +361,33 @@ export function runSelfTest(): SelfTestReport {
     const r = nestJob(job)
     const ok = r.sheets[0].boardId === 'offcut_test' && r.sheets.length === 1
     add('余料登记后优先作为小板材参与排样', ok, ok ? '零件排上了 900×700 余料板' : '余料未被优先使用')
+
+    // 余料小板不计自购张数、不进 boardsByType、不计料钱，但单独计数并标记来源
+    const stockBoard = makeBoard({ id: 'stock_paid', priceCents: 13800 })
+    const job2 = makeJob(
+      [
+        makePart({ code: 'OC', lenMm: 500, widMm: 500 }),
+        makePart({ code: 'ST', lenMm: 2000, widMm: 1000 })
+      ],
+      { boards: [small, stockBoard] }
+    )
+    const r2 = nestJob(job2)
+    const ocSheet = r2.sheets.find((s) => s.boardId === 'offcut_test')
+    const statsOk =
+      !!ocSheet &&
+      ocSheet.kind === 'offcut' &&
+      ocSheet.offcutId === undefined && // 该用例没带 offcutId
+      r2.boardsUsed === 1 &&
+      r2.offcutBoardsUsed === 1 &&
+      Object.keys(r2.boardsByType).every((n) => n !== '余料板 900×700') &&
+      r2.totalCostCents === 13800
+    add(
+      '余料小板不计自购张数与料钱，张数/料钱只算项目自购板',
+      statsOk,
+      statsOk
+        ? `自购 ${r2.boardsUsed} 张 ¥${r2.totalCostCents / 100}，余料 ${r2.offcutBoardsUsed} 块`
+        : '张数或料钱误把余料板算进去了'
+    )
   }
 
   // 7) 300 零件（40 种规格）性能

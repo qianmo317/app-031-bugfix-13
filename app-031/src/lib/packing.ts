@@ -15,6 +15,7 @@ import type {
 import { EPS, type Rect } from './geometry'
 import { buildSteps, simulate } from './cuts'
 import type { DSeg } from './cuts'
+import { OFFCUT_MIN_MM } from './offcuts'
 
 interface Inst {
   part: Part
@@ -339,9 +340,12 @@ export function nestJob(job: Job): NestResult {
   const results: SheetResult[] = sheets.map((s) => buildSheet(s, kerf, trim))
 
   // 统计
+  // 统计：张数与料钱只按项目自购板（kind !== 'offcut'）算；
+  // 余料小板是本次临时拼入的已有料，不计采购张数、不计钱。
+  const stockSheets = results.filter((s) => s.kind !== 'offcut')
   const boardsByType: Record<string, number> = {}
   let totalCost = 0
-  for (const s of results) {
+  for (const s of stockSheets) {
     boardsByType[s.boardName] = (boardsByType[s.boardName] ?? 0) + 1
     totalCost += s.priceCents
   }
@@ -373,8 +377,8 @@ export function nestJob(job: Job): NestResult {
           : '因纹理要求为横纹（不可旋转），现有板材排不下'
   }))
 
-  const baselineBoards = shelfBaseline(job, boards, kerf, trim, results.length)
-  const optimizedBoards = results.length
+  const baselineBoards = shelfBaseline(job, boards, kerf, trim, stockSheets.length)
+  const optimizedBoards = stockSheets.length
   const savedBoards = Math.max(0, baselineBoards - optimizedBoards)
   const stockShortage = boards
     .filter((b) => b.kind !== 'offcut' && b.quantity > 0)
@@ -386,15 +390,15 @@ export function nestJob(job: Job): NestResult {
     }))
     .filter((x) => x.need > x.have)
 
-  const stockUsed = results.filter((s) => s.priceCents > 0)
   const avgPrice =
-    stockUsed.length > 0
-      ? stockUsed.reduce((a, s) => a + s.priceCents, 0) / stockUsed.length
+    stockSheets.length > 0
+      ? stockSheets.reduce((a, s) => a + s.priceCents, 0) / stockSheets.length
       : job.boards.reduce((a, b) => a + b.priceCents, 0) / Math.max(1, job.boards.length)
 
   return {
     sheets: results,
     boardsUsed: optimizedBoards,
+    offcutBoardsUsed: results.length - stockSheets.length,
     boardsByType,
     edgeBandM: {
       exposed: Math.round(exposedM * 100) / 100,
@@ -440,7 +444,7 @@ function buildSheet(s: SheetState, kerf: number, trim: number): SheetResult {
       wMm: Math.round(f.w),
       hMm: Math.round(f.h),
       areaMm2: Math.round(f.w * f.h),
-      usable: f.w >= 300 - EPS && f.h >= 300 - EPS
+      usable: f.w >= OFFCUT_MIN_MM - EPS && f.h >= OFFCUT_MIN_MM - EPS
     }))
     .sort((a, c) => c.areaMm2 - a.areaMm2)
 
@@ -453,6 +457,8 @@ function buildSheet(s: SheetState, kerf: number, trim: number): SheetResult {
     wMm: b.wMm,
     hMm: b.hMm,
     priceCents: b.kind === 'offcut' ? 0 : b.priceCents,
+    kind: b.kind,
+    offcutId: b.offcutId,
     placements: s.placements,
     steps,
     usedAreaMm2: usedArea,
